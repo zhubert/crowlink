@@ -1,3 +1,5 @@
+[![CleverCrow](https://img.shields.io/endpoint?url=https%3A%2F%2Fapp.clevercrow.io%2Fapi%2Fpublic%2Fbadge%2Fzhubert%2Fcrowlink)](https://clevercrow.io)
+
 # crowlink
 
 A small, dependency-light URL shortener service written in Go.
