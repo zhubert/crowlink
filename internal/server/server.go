@@ -11,13 +11,11 @@ import (
 	"github.com/zhubert/crowlink/internal/validate"
 )
 
-// baseURL is the base URL used to construct short URLs. It will be made
-// configurable in a later issue (#9).
-const baseURL = "http://localhost:8080"
-
 // New builds and returns an http.Handler configured with all routes.
-// The provided store.Store is available to route handlers for persistence.
-func New(s store.Store) http.Handler {
+// The provided store.Store is available to route handlers for persistence,
+// and baseURL is used to construct the short_url field in responses (see
+// internal/config).
+func New(s store.Store, baseURL string) http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
