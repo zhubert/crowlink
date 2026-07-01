@@ -13,7 +13,7 @@ import (
 )
 
 func TestHealthz(t *testing.T) {
-	handler := server.New(store.NewMemStore())
+	handler := server.New(store.NewMemStore(), "http://localhost:8080")
 
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	rec := httptest.NewRecorder()
@@ -48,7 +48,7 @@ func TestRedirectKnownCode(t *testing.T) {
 		t.Fatalf("Put(%q) unexpected error: %v", originalURL, err)
 	}
 
-	handler := server.New(s)
+	handler := server.New(s, "http://localhost:8080")
 	req := httptest.NewRequest(http.MethodGet, "/"+code, nil)
 	rec := httptest.NewRecorder()
 
@@ -70,7 +70,7 @@ func TestRedirectKnownCode(t *testing.T) {
 // TestRedirectUnknownCode verifies that GET /{code} returns 404 when the code
 // is not present in the store.
 func TestRedirectUnknownCode(t *testing.T) {
-	handler := server.New(store.NewMemStore())
+	handler := server.New(store.NewMemStore(), "http://localhost:8080")
 
 	req := httptest.NewRequest(http.MethodGet, "/doesnotexist", nil)
 	rec := httptest.NewRecorder()
@@ -93,7 +93,7 @@ func TestRedirectUnknownCode(t *testing.T) {
 // If that route is not yet implemented the test is skipped gracefully.
 func TestRoundTrip(t *testing.T) {
 	s := store.NewMemStore()
-	handler := server.New(s)
+	handler := server.New(s, "http://localhost:8080")
 	srv := httptest.NewServer(handler)
 	defer srv.Close()
 
@@ -214,7 +214,7 @@ func TestPostShorten(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			handler := server.New(store.NewMemStore())
+			handler := server.New(store.NewMemStore(), "http://localhost:8080")
 
 			req := httptest.NewRequest(http.MethodPost, "/shorten", strings.NewReader(tc.body))
 			if tc.contentType != "" {
@@ -239,5 +239,42 @@ func TestPostShorten(t *testing.T) {
 				tc.checkBody(t, body)
 			}
 		})
+	}
+}
+
+// TestPostShorten_UsesConfiguredBaseURL verifies that short_url reflects
+// whatever base URL was passed to server.New, not a hardcoded value.
+func TestPostShorten_UsesConfiguredBaseURL(t *testing.T) {
+	const customBaseURL = "https://short.example.com"
+
+	handler := server.New(store.NewMemStore(), customBaseURL)
+
+	req := httptest.NewRequest(http.MethodPost, "/shorten",
+		strings.NewReader(`{"url":"https://example.com/some/path"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	res := rec.Result()
+	defer res.Body.Close()
+
+	if res.StatusCode != http.StatusCreated {
+		t.Fatalf("expected status 201, got %d", res.StatusCode)
+	}
+
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		t.Fatalf("reading body: %v", err)
+	}
+
+	var resp map[string]string
+	if err := json.Unmarshal(body, &resp); err != nil {
+		t.Fatalf("response is not valid JSON: %v", err)
+	}
+
+	wantPrefix := customBaseURL + "/"
+	if !strings.HasPrefix(resp["short_url"], wantPrefix) {
+		t.Errorf("short_url %q does not start with configured base URL %q", resp["short_url"], wantPrefix)
 	}
 }
