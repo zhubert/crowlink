@@ -77,5 +77,5 @@ func New(s store.Store) http.Handler {
 		http.Redirect(w, r, url, http.StatusFound)
 	})
 
-	return mux
+	return loggingMiddleware(mux)
 }
