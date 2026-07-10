@@ -12,6 +12,10 @@ import (
 // Put stores the given URL and returns the short code assigned to it.
 // Get retrieves the URL associated with the given short code; ok is false
 // if the code is not found.
+//
+// MemStore (below) and BoltStore (bolt.go) both satisfy Store: MemStore
+// keeps everything in memory, while BoltStore persists records to a bbolt
+// file on disk so they survive process restarts.
 type Store interface {
 	Put(url string) (code string, err error)
 	Get(code string) (url string, ok bool)
