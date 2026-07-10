@@ -40,5 +40,16 @@ issues and pull requests to follow along.
 ```sh
 go test ./...     # run the test suite
 go vet ./...      # vet
-go run .          # start the server (default :8080)
+go run .          # start the server (default :8080, in-memory store)
 ```
+
+By default crowlink uses an in-memory store, which does not persist across
+restarts. To persist links to disk with the bbolt-backed store, set `STORE`
+to `bolt` and optionally point `DB_PATH` at the database file (it defaults to
+`crowlink.db` in the working directory):
+
+```sh
+STORE=bolt DB_PATH=/tmp/crowlink.db go run .
+```
+
+The same options are available as flags: `-store bolt -db-path /tmp/crowlink.db`.

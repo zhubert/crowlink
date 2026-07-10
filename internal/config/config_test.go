@@ -32,6 +32,9 @@ func TestLoad_Defaults(t *testing.T) {
 	if cfg.Store != "mem" {
 		t.Errorf("Store = %q; want %q", cfg.Store, "mem")
 	}
+	if cfg.DBPath != "crowlink.db" {
+		t.Errorf("DBPath = %q; want %q", cfg.DBPath, "crowlink.db")
+	}
 }
 
 func TestLoad_EnvOverride(t *testing.T) {
@@ -39,6 +42,7 @@ func TestLoad_EnvOverride(t *testing.T) {
 		"ADDR":     ":9090",
 		"BASE_URL": "https://short.example.com",
 		"STORE":    "mem",
+		"DB_PATH":  "/var/data/crowlink.db",
 	})
 
 	cfg, err := config.Load(nil, getenv)
@@ -54,6 +58,31 @@ func TestLoad_EnvOverride(t *testing.T) {
 	}
 	if cfg.Store != "mem" {
 		t.Errorf("Store = %q; want %q", cfg.Store, "mem")
+	}
+	if cfg.DBPath != "/var/data/crowlink.db" {
+		t.Errorf("DBPath = %q; want %q", cfg.DBPath, "/var/data/crowlink.db")
+	}
+}
+
+func TestLoad_BoltStoreValid(t *testing.T) {
+	cfg, err := config.Load([]string{"-store", "bolt"}, noEnv)
+	if err != nil {
+		t.Fatalf("Load() unexpected error: %v", err)
+	}
+	if cfg.Store != "bolt" {
+		t.Errorf("Store = %q; want %q", cfg.Store, "bolt")
+	}
+}
+
+func TestLoad_DBPathFlagOverridesEnv(t *testing.T) {
+	getenv := envMap(map[string]string{"DB_PATH": "/from-env.db"})
+
+	cfg, err := config.Load([]string{"-db-path", "/from-flag.db"}, getenv)
+	if err != nil {
+		t.Fatalf("Load() unexpected error: %v", err)
+	}
+	if cfg.DBPath != "/from-flag.db" {
+		t.Errorf("DBPath = %q; want flag value %q", cfg.DBPath, "/from-flag.db")
 	}
 }
 

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -26,9 +27,27 @@ func main() {
 	switch cfg.Store {
 	case "mem":
 		st = store.NewMemStore()
+	case "bolt":
+		bs, err := store.NewBoltStore(cfg.DBPath)
+		if err != nil {
+			log.Fatalf("opening bolt store at %q: %v", cfg.DBPath, err)
+		}
+		st = bs
 	default:
 		// config.Get already validates Store, so this should be unreachable.
 		log.Fatalf("unknown store %q", cfg.Store)
+	}
+
+	// If the selected store needs to flush state to disk on shutdown (e.g.
+	// BoltStore), close it once main returns. Store itself doesn't require
+	// Close, so we type-assert for io.Closer rather than forcing every
+	// implementation (like MemStore) to provide a no-op.
+	if closer, ok := st.(io.Closer); ok {
+		defer func() {
+			if err := closer.Close(); err != nil {
+				log.Printf("closing store: %v", err)
+			}
+		}()
 	}
 
 	handler := server.New(st, cfg.BaseURL)

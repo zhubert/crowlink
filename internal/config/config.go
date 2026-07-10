@@ -17,6 +17,7 @@ const (
 	defaultAddr    = ":8080"
 	defaultBaseURL = "http://localhost:8080"
 	defaultStore   = "mem"
+	defaultDBPath  = "crowlink.db"
 )
 
 // Config holds the runtime configuration for the crowlink server.
@@ -26,13 +27,17 @@ type Config struct {
 	// BaseURL is the externally-visible base URL used to construct short
 	// URLs returned from POST /shorten.
 	BaseURL string
-	// Store selects the storage backend. Currently only "mem" is supported.
+	// Store selects the storage backend: "mem" or "bolt".
 	Store string
+	// DBPath is the filesystem path to the bbolt database file. It is only
+	// used when Store is "bolt".
+	DBPath string
 }
 
 // validStores enumerates the recognized values for Store.
 var validStores = map[string]bool{
-	"mem": true,
+	"mem":  true,
+	"bolt": true,
 }
 
 // Load builds a Config from defaults, then environment variables (via
@@ -46,6 +51,7 @@ func Load(args []string, getenv func(string) string) (*Config, error) {
 	addr := defaultAddr
 	baseURL := defaultBaseURL
 	store := defaultStore
+	dbPath := defaultDBPath
 
 	if v := getenv("ADDR"); v != "" {
 		addr = v
@@ -56,11 +62,15 @@ func Load(args []string, getenv func(string) string) (*Config, error) {
 	if v := getenv("STORE"); v != "" {
 		store = v
 	}
+	if v := getenv("DB_PATH"); v != "" {
+		dbPath = v
+	}
 
 	fs := flag.NewFlagSet("crowlink", flag.ContinueOnError)
 	addrFlag := fs.String("addr", addr, "address for the HTTP server to listen on")
 	baseURLFlag := fs.String("base-url", baseURL, "externally-visible base URL used to build short URLs")
-	storeFlag := fs.String("store", store, "storage backend selector (mem)")
+	storeFlag := fs.String("store", store, "storage backend selector (mem|bolt)")
+	dbPathFlag := fs.String("db-path", dbPath, "filesystem path to the bbolt database file (used when store=bolt)")
 
 	if err := fs.Parse(args); err != nil {
 		return nil, err
@@ -70,10 +80,11 @@ func Load(args []string, getenv func(string) string) (*Config, error) {
 		Addr:    *addrFlag,
 		BaseURL: *baseURLFlag,
 		Store:   *storeFlag,
+		DBPath:  *dbPathFlag,
 	}
 
 	if !validStores[cfg.Store] {
-		return nil, fmt.Errorf("invalid STORE value %q: must be one of: mem", cfg.Store)
+		return nil, fmt.Errorf("invalid STORE value %q: must be one of: mem, bolt", cfg.Store)
 	}
 
 	return cfg, nil
