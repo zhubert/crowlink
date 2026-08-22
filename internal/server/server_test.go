@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/zhubert/crowlink/internal/server"
 	"github.com/zhubert/crowlink/internal/store"
@@ -276,5 +277,82 @@ func TestPostShorten_UsesConfiguredBaseURL(t *testing.T) {
 	wantPrefix := customBaseURL + "/"
 	if !strings.HasPrefix(resp["short_url"], wantPrefix) {
 		t.Errorf("short_url %q does not start with configured base URL %q", resp["short_url"], wantPrefix)
+	}
+}
+
+// TestStatsAfterRedirects covers the acceptance criterion for click
+// analytics: redirect N times, then GET /{code}/stats and expect clicks == N.
+func TestStatsAfterRedirects(t *testing.T) {
+	s := store.NewMemStore()
+	const originalURL = "https://example.com/some/path"
+
+	code, err := s.Put(originalURL)
+	if err != nil {
+		t.Fatalf("Put(%q) unexpected error: %v", originalURL, err)
+	}
+
+	handler := server.New(s, "http://localhost:8080")
+
+	const n = 5
+	for i := 0; i < n; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/"+code, nil)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusFound {
+			t.Fatalf("redirect %d: expected status %d, got %d", i+1, http.StatusFound, rec.Code)
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/"+code+"/stats", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	res := rec.Result()
+	defer res.Body.Close()
+
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", res.StatusCode)
+	}
+	if ct := res.Header.Get("Content-Type"); !strings.Contains(ct, "application/json") {
+		t.Errorf("expected JSON Content-Type, got %q", ct)
+	}
+
+	var body struct {
+		Code      string    `json:"code"`
+		URL       string    `json:"url"`
+		Clicks    uint64    `json:"clicks"`
+		CreatedAt time.Time `json:"created_at"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&body); err != nil {
+		t.Fatalf("decoding stats body: %v", err)
+	}
+
+	if body.Code != code {
+		t.Errorf("code = %q; want %q", body.Code, code)
+	}
+	if body.URL != originalURL {
+		t.Errorf("url = %q; want %q", body.URL, originalURL)
+	}
+	if body.Clicks != n {
+		t.Errorf("clicks = %d; want %d", body.Clicks, n)
+	}
+	if body.CreatedAt.IsZero() {
+		t.Error("created_at is the zero time; want the record's creation timestamp")
+	}
+}
+
+// TestStatsUnknownCode verifies that stats for a code that was never stored
+// returns 404.
+func TestStatsUnknownCode(t *testing.T) {
+	handler := server.New(store.NewMemStore(), "http://localhost:8080")
+
+	req := httptest.NewRequest(http.MethodGet, "/doesnotexist/stats", nil)
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected status %d, got %d", http.StatusNotFound, rec.Code)
 	}
 }
