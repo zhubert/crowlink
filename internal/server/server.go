@@ -4,6 +4,7 @@ package server
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 
@@ -62,6 +63,19 @@ func New(s store.Store, baseURL string) http.Handler {
 		})
 	})
 
+	// GET /{code}/stats – report click analytics for a short code as JSON.
+	mux.HandleFunc("GET /{code}/stats", func(w http.ResponseWriter, r *http.Request) {
+		code := r.PathValue("code")
+		rec, ok := s.Stats(code)
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(rec)
+	})
+
 	// GET /{code} – look up short code and issue a 302 redirect.
 	// This catch-all pattern is registered last so it does not shadow
 	// the more-specific /healthz and /shorten routes.
@@ -72,6 +86,13 @@ func New(s store.Store, baseURL string) http.Handler {
 			http.NotFound(w, r)
 			return
 		}
+
+		// Record the click. A failure here must not cost the visitor their
+		// redirect, so log it and carry on.
+		if err := s.IncrementClicks(code); err != nil {
+			slog.Error("incrementing clicks", "code", code, "error", err)
+		}
+
 		http.Redirect(w, r, url, http.StatusFound)
 	})
 

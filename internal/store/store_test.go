@@ -1,10 +1,12 @@
 package store_test
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/zhubert/crowlink/internal/store"
 )
@@ -194,5 +196,79 @@ func TestBoltStore_Persistence(t *testing.T) {
 	}
 	if secondCode == code {
 		t.Errorf("Put after reopen returned duplicate code %q; counter did not persist", secondCode)
+	}
+}
+
+// TestIncrementClicksAndStats verifies that a freshly stored record starts at
+// zero clicks with a populated created_at, and that each IncrementClicks call
+// bumps the counter reported by Stats.
+func TestIncrementClicksAndStats(t *testing.T) {
+	for _, tc := range storeCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			s := tc.newStore(t)
+
+			const input = "https://example.com/some/path"
+			before := time.Now().UTC().Add(-time.Second)
+			code, err := s.Put(input)
+			if err != nil {
+				t.Fatalf("Put(%q) returned unexpected error: %v", input, err)
+			}
+
+			rec, ok := s.Stats(code)
+			if !ok {
+				t.Fatalf("Stats(%q) returned ok=false; want ok=true", code)
+			}
+			if rec.Code != code {
+				t.Errorf("Stats(%q).Code = %q; want %q", code, rec.Code, code)
+			}
+			if rec.URL != input {
+				t.Errorf("Stats(%q).URL = %q; want %q", code, rec.URL, input)
+			}
+			if rec.Clicks != 0 {
+				t.Errorf("Stats(%q).Clicks = %d; want 0", code, rec.Clicks)
+			}
+			if rec.CreatedAt.Before(before) {
+				t.Errorf("Stats(%q).CreatedAt = %v; want a time at or after %v", code, rec.CreatedAt, before)
+			}
+
+			const n = 3
+			for i := 0; i < n; i++ {
+				if err := s.IncrementClicks(code); err != nil {
+					t.Fatalf("IncrementClicks(%q) returned unexpected error: %v", code, err)
+				}
+			}
+
+			rec, ok = s.Stats(code)
+			if !ok {
+				t.Fatalf("Stats(%q) returned ok=false after increments; want ok=true", code)
+			}
+			if rec.Clicks != n {
+				t.Errorf("Stats(%q).Clicks = %d; want %d", code, rec.Clicks, n)
+			}
+		})
+	}
+}
+
+// TestStatsUnknown verifies that Stats reports ok=false and IncrementClicks
+// reports an error for a code that was never stored.
+func TestStatsUnknown(t *testing.T) {
+	for _, tc := range storeCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			s := tc.newStore(t)
+
+			const unknown = "nope"
+			if _, ok := s.Stats(unknown); ok {
+				t.Errorf("Stats(%q) returned ok=true; want ok=false", unknown)
+			}
+			err := s.IncrementClicks(unknown)
+			if err == nil {
+				t.Fatalf("IncrementClicks(%q) returned nil error; want an error", unknown)
+			}
+			if !errors.Is(err, store.ErrNotFound) {
+				t.Errorf("IncrementClicks(%q) error = %v; want it to wrap store.ErrNotFound", unknown, err)
+			}
+		})
 	}
 }
