@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/zhubert/crowlink/internal/shortcode"
 	"github.com/zhubert/crowlink/internal/store"
 )
 
@@ -268,6 +269,104 @@ func TestStatsUnknown(t *testing.T) {
 			}
 			if !errors.Is(err, store.ErrNotFound) {
 				t.Errorf("IncrementClicks(%q) error = %v; want it to wrap store.ErrNotFound", unknown, err)
+			}
+		})
+	}
+}
+
+// TestPutAlias verifies that a URL stored under a custom alias is retrievable
+// under that alias and carries it as its code.
+func TestPutAlias(t *testing.T) {
+	for _, tc := range storeCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			s := tc.newStore(t)
+
+			const alias = "my-link"
+			const url = "https://example.com/custom"
+
+			if err := s.PutAlias(url, alias); err != nil {
+				t.Fatalf("PutAlias(%q, %q) unexpected error: %v", url, alias, err)
+			}
+
+			got, ok := s.Get(alias)
+			if !ok {
+				t.Fatalf("Get(%q) returned ok=false; want ok=true", alias)
+			}
+			if got != url {
+				t.Errorf("Get(%q) = %q; want %q", alias, got, url)
+			}
+
+			rec, ok := s.Stats(alias)
+			if !ok {
+				t.Fatalf("Stats(%q) returned ok=false; want ok=true", alias)
+			}
+			if rec.Code != alias {
+				t.Errorf("Stats(%q).Code = %q; want %q", alias, rec.Code, alias)
+			}
+			if rec.CreatedAt.IsZero() {
+				t.Errorf("Stats(%q).CreatedAt is zero; want a timestamp", alias)
+			}
+		})
+	}
+}
+
+// TestPutAliasDuplicate verifies that reusing an alias fails with
+// ErrAliasTaken and leaves the original entry untouched.
+func TestPutAliasDuplicate(t *testing.T) {
+	for _, tc := range storeCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			s := tc.newStore(t)
+
+			const alias = "taken"
+			const first = "https://example.com/first"
+
+			if err := s.PutAlias(first, alias); err != nil {
+				t.Fatalf("PutAlias(%q, %q) unexpected error: %v", first, alias, err)
+			}
+
+			err := s.PutAlias("https://example.com/second", alias)
+			if err == nil {
+				t.Fatalf("PutAlias with duplicate alias %q returned nil error; want an error", alias)
+			}
+			if !errors.Is(err, store.ErrAliasTaken) {
+				t.Errorf("PutAlias duplicate error = %v; want it to wrap store.ErrAliasTaken", err)
+			}
+
+			if got, _ := s.Get(alias); got != first {
+				t.Errorf("Get(%q) = %q after failed overwrite; want %q", alias, got, first)
+			}
+		})
+	}
+}
+
+// TestPutSkipsAliasedCodes verifies that generated codes never overwrite an
+// entry already claimed by a custom alias.
+func TestPutSkipsAliasedCodes(t *testing.T) {
+	for _, tc := range storeCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			s := tc.newStore(t)
+
+			// The first generated code is deterministic; claim it as an
+			// alias so Put must skip past it.
+			first := shortcode.Encode(1)
+			const aliasURL = "https://example.com/reserved"
+			if err := s.PutAlias(aliasURL, first); err != nil {
+				t.Fatalf("PutAlias(%q, %q) unexpected error: %v", aliasURL, first, err)
+			}
+
+			code, err := s.Put("https://example.com/generated")
+			if err != nil {
+				t.Fatalf("Put() unexpected error: %v", err)
+			}
+			if code == first {
+				t.Fatalf("Put() returned %q, which is already claimed by an alias", code)
+			}
+
+			if got, _ := s.Get(first); got != aliasURL {
+				t.Errorf("Get(%q) = %q; want the alias target %q", first, got, aliasURL)
 			}
 		})
 	}

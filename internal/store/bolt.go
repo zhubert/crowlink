@@ -3,6 +3,7 @@ package store
 import (
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -71,7 +72,7 @@ func decodeRecord(code string, v []byte) Record {
 
 // Put stores url under a new short code derived from a persisted,
 // auto-incrementing counter (encoded via shortcode.Encode), and returns the
-// code.
+// code. Codes already claimed by a custom alias are skipped.
 func (b *BoltStore) Put(url string) (string, error) {
 	var code string
 
@@ -83,9 +84,13 @@ func (b *BoltStore) Put(url string) (string, error) {
 		if v := meta.Get(counterKey); v != nil {
 			counter = binary.BigEndian.Uint64(v)
 		}
-		counter++
-
-		code = shortcode.Encode(counter)
+		for {
+			counter++
+			code = shortcode.Encode(counter)
+			if links.Get([]byte(code)) == nil {
+				break
+			}
+		}
 
 		rec, err := json.Marshal(Record{
 			Code:      code,
@@ -108,6 +113,36 @@ func (b *BoltStore) Put(url string) (string, error) {
 	}
 
 	return code, nil
+}
+
+// PutAlias stores url under the caller-chosen alias. It returns ErrAliasTaken
+// if the alias is already in use. The alias is assumed to have been validated
+// by the caller (see internal/validate.Alias).
+func (b *BoltStore) PutAlias(url, alias string) error {
+	err := b.db.Update(func(tx *bbolt.Tx) error {
+		links := tx.Bucket(linksBucket)
+
+		if links.Get([]byte(alias)) != nil {
+			return fmt.Errorf("%w: %q", ErrAliasTaken, alias)
+		}
+
+		rec, err := json.Marshal(Record{
+			Code:      alias,
+			URL:       url,
+			CreatedAt: time.Now().UTC(),
+		})
+		if err != nil {
+			return err
+		}
+		return links.Put([]byte(alias), rec)
+	})
+	if err != nil {
+		if errors.Is(err, ErrAliasTaken) {
+			return err
+		}
+		return fmt.Errorf("store: put alias: %w", err)
+	}
+	return nil
 }
 
 // Get returns the URL stored under code. ok is false when code is unknown.
