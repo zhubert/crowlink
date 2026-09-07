@@ -19,10 +19,12 @@ type Record struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
-// Store is the interface that wraps the basic Put, Get, IncrementClicks and
-// Stats methods.
+// Store is the interface that wraps the basic Put, PutAlias, Get,
+// IncrementClicks and Stats methods.
 //
 // Put stores the given URL and returns the short code assigned to it.
+// PutAlias stores the given URL under a caller-chosen alias, returning
+// ErrAliasTaken if that alias is already in use.
 // Get retrieves the URL associated with the given short code; ok is false
 // if the code is not found.
 // IncrementClicks bumps the click counter for code, returning an error if
@@ -35,6 +37,7 @@ type Record struct {
 // file on disk so they survive process restarts.
 type Store interface {
 	Put(url string) (code string, err error)
+	PutAlias(url, alias string) error
 	Get(code string) (url string, ok bool)
 	IncrementClicks(code string) error
 	Stats(code string) (rec Record, ok bool)
@@ -42,6 +45,10 @@ type Store interface {
 
 // ErrNotFound is returned by IncrementClicks when the given code is unknown.
 var ErrNotFound = fmt.Errorf("store: code not found")
+
+// ErrAliasTaken is returned by PutAlias when the requested alias is already
+// in use.
+var ErrAliasTaken = fmt.Errorf("store: alias already taken")
 
 // MemStore is an in-memory implementation of Store. It is safe for concurrent
 // use by multiple goroutines.
@@ -62,19 +69,46 @@ func NewMemStore() *MemStore {
 }
 
 // Put stores url and returns the short code derived from an auto-incrementing
-// counter encoded via shortcode.Encode.
+// counter encoded via shortcode.Encode. Codes already claimed by a custom
+// alias are skipped.
 func (m *MemStore) Put(url string) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	m.counter++
-	code := shortcode.Encode(m.counter)
+	var code string
+	for {
+		m.counter++
+		code = shortcode.Encode(m.counter)
+		if _, taken := m.entries[code]; !taken {
+			break
+		}
+	}
+
 	m.entries[code] = Record{
 		Code:      code,
 		URL:       url,
 		CreatedAt: time.Now().UTC(),
 	}
 	return code, nil
+}
+
+// PutAlias stores url under the caller-chosen alias. It returns ErrAliasTaken
+// if the alias is already in use. The alias is assumed to have been validated
+// by the caller (see internal/validate.Alias).
+func (m *MemStore) PutAlias(url, alias string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if _, taken := m.entries[alias]; taken {
+		return fmt.Errorf("%w: %q", ErrAliasTaken, alias)
+	}
+
+	m.entries[alias] = Record{
+		Code:      alias,
+		URL:       url,
+		CreatedAt: time.Now().UTC(),
+	}
+	return nil
 }
 
 // Get returns the URL stored under code. ok is false when code is unknown.

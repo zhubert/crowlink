@@ -3,6 +3,7 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -34,7 +35,8 @@ func New(s store.Store, baseURL string) http.Handler {
 
 		// 2. Decode JSON body.
 		var req struct {
-			URL string `json:"url"`
+			URL   string `json:"url"`
+			Alias string `json:"alias"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, "malformed JSON: "+err.Error(), http.StatusBadRequest)
@@ -47,11 +49,29 @@ func New(s store.Store, baseURL string) http.Handler {
 			return
 		}
 
-		// 4. Store the URL.
-		code, err := s.Put(req.URL)
-		if err != nil {
-			http.Error(w, "failed to store URL: "+err.Error(), http.StatusInternalServerError)
-			return
+		// 4. Store the URL, under the requested alias if one was given.
+		var code string
+		if req.Alias != "" {
+			if err := validate.Alias(req.Alias); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if err := s.PutAlias(req.URL, req.Alias); err != nil {
+				if errors.Is(err, store.ErrAliasTaken) {
+					http.Error(w, "alias is already taken", http.StatusConflict)
+					return
+				}
+				http.Error(w, "failed to store URL: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			code = req.Alias
+		} else {
+			var err error
+			code, err = s.Put(req.URL)
+			if err != nil {
+				http.Error(w, "failed to store URL: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
 		}
 
 		// 5. Respond 201 with JSON body.

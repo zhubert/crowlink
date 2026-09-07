@@ -13,6 +13,9 @@ a CLI client.
 POST /shorten  {"url":"https://example.com/very/long/path"}
   -> {"code":"aB3x","short_url":"http://localhost:8080/aB3x"}
 
+POST /shorten  {"url":"https://example.com/docs","alias":"docs"}
+  -> {"code":"docs","short_url":"http://localhost:8080/docs"}
+
 GET  /aB3x        -> 302 redirect to the original URL
 GET  /aB3x/stats  -> {"code":"aB3x","url":"...","clicks":42,"created_at":"..."}
 ```

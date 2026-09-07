@@ -356,3 +356,109 @@ func TestStatsUnknownCode(t *testing.T) {
 		t.Fatalf("expected status %d, got %d", http.StatusNotFound, rec.Code)
 	}
 }
+
+// postShorten issues a POST /shorten with the given raw JSON body and returns
+// the recorded response.
+func postShorten(t *testing.T, handler http.Handler, body string) *http.Response {
+	t.Helper()
+
+	req := httptest.NewRequest(http.MethodPost, "/shorten", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	return rec.Result()
+}
+
+// TestPostShortenWithAlias verifies that a valid custom alias is used as the
+// short code and resolves on redirect.
+func TestPostShortenWithAlias(t *testing.T) {
+	handler := server.New(store.NewMemStore(), "http://localhost:8080")
+
+	res := postShorten(t, handler, `{"url":"https://example.com/custom","alias":"my-link"}`)
+	defer res.Body.Close()
+
+	if res.StatusCode != http.StatusCreated {
+		t.Fatalf("expected status 201, got %d", res.StatusCode)
+	}
+
+	var got struct {
+		Code     string `json:"code"`
+		ShortURL string `json:"short_url"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&got); err != nil {
+		t.Fatalf("decoding response: %v", err)
+	}
+	if got.Code != "my-link" {
+		t.Errorf("code = %q; want %q", got.Code, "my-link")
+	}
+	if want := "http://localhost:8080/my-link"; got.ShortURL != want {
+		t.Errorf("short_url = %q; want %q", got.ShortURL, want)
+	}
+
+	// The alias must resolve on redirect.
+	req := httptest.NewRequest(http.MethodGet, "/my-link", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusFound {
+		t.Fatalf("GET /my-link: expected status 302, got %d", rec.Code)
+	}
+	if loc := rec.Header().Get("Location"); loc != "https://example.com/custom" {
+		t.Errorf("Location = %q; want %q", loc, "https://example.com/custom")
+	}
+}
+
+// TestPostShortenDuplicateAlias verifies that requesting an alias that is
+// already in use returns 409 Conflict and leaves the original mapping intact.
+func TestPostShortenDuplicateAlias(t *testing.T) {
+	handler := server.New(store.NewMemStore(), "http://localhost:8080")
+
+	first := postShorten(t, handler, `{"url":"https://example.com/first","alias":"dupe"}`)
+	first.Body.Close()
+	if first.StatusCode != http.StatusCreated {
+		t.Fatalf("first POST: expected status 201, got %d", first.StatusCode)
+	}
+
+	second := postShorten(t, handler, `{"url":"https://example.com/second","alias":"dupe"}`)
+	defer second.Body.Close()
+	if second.StatusCode != http.StatusConflict {
+		t.Fatalf("duplicate alias: expected status 409, got %d", second.StatusCode)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/dupe", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if loc := rec.Header().Get("Location"); loc != "https://example.com/first" {
+		t.Errorf("Location = %q after conflicting request; want %q", loc, "https://example.com/first")
+	}
+}
+
+// TestPostShortenInvalidAlias verifies that aliases with a disallowed charset
+// or matching a reserved server path are rejected with 400.
+func TestPostShortenInvalidAlias(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "invalid charset", body: `{"url":"https://example.com","alias":"bad alias!"}`},
+		{name: "path separator", body: `{"url":"https://example.com","alias":"foo/bar"}`},
+		{name: "too long", body: `{"url":"https://example.com","alias":"` + strings.Repeat("a", 65) + `"}`},
+		{name: "reserved healthz", body: `{"url":"https://example.com","alias":"healthz"}`},
+		{name: "reserved shorten", body: `{"url":"https://example.com","alias":"shorten"}`},
+		{name: "reserved metrics", body: `{"url":"https://example.com","alias":"metrics"}`},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			handler := server.New(store.NewMemStore(), "http://localhost:8080")
+
+			res := postShorten(t, handler, tc.body)
+			defer res.Body.Close()
+
+			if res.StatusCode != http.StatusBadRequest {
+				t.Fatalf("expected status 400, got %d", res.StatusCode)
+			}
+		})
+	}
+}
