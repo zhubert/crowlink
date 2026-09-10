@@ -35,8 +35,9 @@ func New(s store.Store, baseURL string) http.Handler {
 
 		// 2. Decode JSON body.
 		var req struct {
-			URL   string `json:"url"`
-			Alias string `json:"alias"`
+			URL       string          `json:"url"`
+			Alias     string          `json:"alias"`
+			ExpiresIn json.RawMessage `json:"expires_in"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, "malformed JSON: "+err.Error(), http.StatusBadRequest)
@@ -49,14 +50,21 @@ func New(s store.Store, baseURL string) http.Handler {
 			return
 		}
 
-		// 4. Store the URL, under the requested alias if one was given.
+		// 4. Validate the optional expiry. A zero ttl means "never expires".
+		ttl, err := validate.ExpiresIn(req.ExpiresIn)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		// 5. Store the URL, under the requested alias if one was given.
 		var code string
 		if req.Alias != "" {
 			if err := validate.Alias(req.Alias); err != nil {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
-			if err := s.PutAlias(req.URL, req.Alias); err != nil {
+			if err := s.PutAlias(req.URL, req.Alias, ttl); err != nil {
 				if errors.Is(err, store.ErrAliasTaken) {
 					http.Error(w, "alias is already taken", http.StatusConflict)
 					return
@@ -66,15 +74,14 @@ func New(s store.Store, baseURL string) http.Handler {
 			}
 			code = req.Alias
 		} else {
-			var err error
-			code, err = s.Put(req.URL)
+			code, err = s.Put(req.URL, ttl)
 			if err != nil {
 				http.Error(w, "failed to store URL: "+err.Error(), http.StatusInternalServerError)
 				return
 			}
 		}
 
-		// 5. Respond 201 with JSON body.
+		// 6. Respond 201 with JSON body.
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(map[string]string{
@@ -86,9 +93,9 @@ func New(s store.Store, baseURL string) http.Handler {
 	// GET /{code}/stats – report click analytics for a short code as JSON.
 	mux.HandleFunc("GET /{code}/stats", func(w http.ResponseWriter, r *http.Request) {
 		code := r.PathValue("code")
-		rec, ok := s.Stats(code)
-		if !ok {
-			http.NotFound(w, r)
+		rec, err := s.Stats(code)
+		if err != nil {
+			writeLookupError(w, r, err)
 			return
 		}
 
@@ -101,9 +108,9 @@ func New(s store.Store, baseURL string) http.Handler {
 	// the more-specific /healthz and /shorten routes.
 	mux.HandleFunc("GET /{code}", func(w http.ResponseWriter, r *http.Request) {
 		code := r.PathValue("code")
-		url, ok := s.Get(code)
-		if !ok {
-			http.NotFound(w, r)
+		url, err := s.Get(code)
+		if err != nil {
+			writeLookupError(w, r, err)
 			return
 		}
 
@@ -117,4 +124,15 @@ func New(s store.Store, baseURL string) http.Handler {
 	})
 
 	return loggingMiddleware(mux)
+}
+
+// writeLookupError translates a store lookup failure into an HTTP response:
+// an expired link is 410 Gone, anything else (including an unknown code) is
+// the usual 404.
+func writeLookupError(w http.ResponseWriter, r *http.Request, err error) {
+	if errors.Is(err, store.ErrExpired) {
+		http.Error(w, "link has expired", http.StatusGone)
+		return
+	}
+	http.NotFound(w, r)
 }

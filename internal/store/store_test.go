@@ -15,8 +15,16 @@ import (
 // storeCase names a Store implementation under test and knows how to
 // construct a fresh, empty instance of it.
 type storeCase struct {
-	name     string
-	newStore func(t *testing.T) store.Store
+	name string
+	// newStoreClock builds an empty store that reads the current time from
+	// now, so expiry can be exercised without sleeping. Pass nil for now to
+	// get the default time.Now clock.
+	newStoreClock func(t *testing.T, now func() time.Time) store.Store
+}
+
+// newStore builds an empty store using the default clock.
+func (tc storeCase) newStore(t *testing.T) store.Store {
+	return tc.newStoreClock(t, nil)
 }
 
 // storeCases enumerates the Store implementations exercised by the
@@ -25,15 +33,15 @@ type storeCase struct {
 var storeCases = []storeCase{
 	{
 		name: "MemStore",
-		newStore: func(t *testing.T) store.Store {
-			return store.NewMemStore()
+		newStoreClock: func(t *testing.T, now func() time.Time) store.Store {
+			return store.NewMemStore(store.WithClock(now))
 		},
 	},
 	{
 		name: "BoltStore",
-		newStore: func(t *testing.T) store.Store {
+		newStoreClock: func(t *testing.T, now func() time.Time) store.Store {
 			dir := t.TempDir()
-			bs, err := store.NewBoltStore(filepath.Join(dir, "test.db"))
+			bs, err := store.NewBoltStore(filepath.Join(dir, "test.db"), store.WithClock(now))
 			if err != nil {
 				t.Fatalf("NewBoltStore() error: %v", err)
 			}
@@ -55,7 +63,7 @@ func TestPutGet(t *testing.T) {
 			s := tc.newStore(t)
 
 			const input = "https://example.com/some/path"
-			code, err := s.Put(input)
+			code, err := s.Put(input, 0)
 			if err != nil {
 				t.Fatalf("Put(%q) returned unexpected error: %v", input, err)
 			}
@@ -63,9 +71,9 @@ func TestPutGet(t *testing.T) {
 				t.Fatal("Put returned an empty code")
 			}
 
-			got, ok := s.Get(code)
-			if !ok {
-				t.Fatalf("Get(%q) returned ok=false; want ok=true", code)
+			got, err := s.Get(code)
+			if err != nil {
+				t.Fatalf("Get(%q) returned unexpected error: %v", code, err)
 			}
 			if got != input {
 				t.Errorf("Get(%q) = %q; want %q", code, got, input)
@@ -74,16 +82,16 @@ func TestPutGet(t *testing.T) {
 	}
 }
 
-// TestGetUnknown verifies that Get returns ok=false for a code that was never stored.
+// TestGetUnknown verifies that Get reports ErrNotFound for a code that was never stored.
 func TestGetUnknown(t *testing.T) {
 	for _, tc := range storeCases {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			s := tc.newStore(t)
 
-			_, ok := s.Get("doesnotexist")
-			if ok {
-				t.Error("Get on unknown code returned ok=true; want ok=false")
+			_, err := s.Get("doesnotexist")
+			if !errors.Is(err, store.ErrNotFound) {
+				t.Errorf("Get on unknown code error = %v; want it to wrap store.ErrNotFound", err)
 			}
 		})
 	}
@@ -112,7 +120,7 @@ func TestStore_Concurrent(t *testing.T) {
 					defer wg.Done()
 					for i := 0; i < puts; i++ {
 						url := fmt.Sprintf("https://example.com/%d/%d", w, i)
-						code, err := s.Put(url)
+						code, err := s.Put(url, 0)
 						if err != nil {
 							t.Errorf("Put(%q) error: %v", url, err)
 							return
@@ -131,9 +139,9 @@ func TestStore_Concurrent(t *testing.T) {
 					defer wg.Done()
 					for i := 0; i < puts; i++ {
 						e := results[w*puts+i]
-						got, ok := s.Get(e.code)
-						if !ok {
-							t.Errorf("Get(%q) returned ok=false after Put", e.code)
+						got, err := s.Get(e.code)
+						if err != nil {
+							t.Errorf("Get(%q) returned unexpected error after Put: %v", e.code, err)
 							return
 						}
 						if got != e.url {
@@ -161,7 +169,7 @@ func TestBoltStore_Persistence(t *testing.T) {
 	}
 
 	const input = "https://example.com/persisted"
-	code, err := bs.Put(input)
+	code, err := bs.Put(input, 0)
 	if err != nil {
 		t.Fatalf("Put(%q) error: %v", input, err)
 	}
@@ -180,9 +188,9 @@ func TestBoltStore_Persistence(t *testing.T) {
 		}
 	}()
 
-	got, ok := reopened.Get(code)
-	if !ok {
-		t.Fatalf("Get(%q) after reopen returned ok=false; want ok=true", code)
+	got, err := reopened.Get(code)
+	if err != nil {
+		t.Fatalf("Get(%q) after reopen returned unexpected error: %v", code, err)
 	}
 	if got != input {
 		t.Errorf("Get(%q) after reopen = %q; want %q", code, got, input)
@@ -191,7 +199,7 @@ func TestBoltStore_Persistence(t *testing.T) {
 	// The id counter must also have survived the reopen: a new Put should
 	// continue from where it left off, not collide with the earlier code.
 	const second = "https://example.com/second"
-	secondCode, err := reopened.Put(second)
+	secondCode, err := reopened.Put(second, 0)
 	if err != nil {
 		t.Fatalf("Put(%q) error: %v", second, err)
 	}
@@ -211,14 +219,14 @@ func TestIncrementClicksAndStats(t *testing.T) {
 
 			const input = "https://example.com/some/path"
 			before := time.Now().UTC().Add(-time.Second)
-			code, err := s.Put(input)
+			code, err := s.Put(input, 0)
 			if err != nil {
 				t.Fatalf("Put(%q) returned unexpected error: %v", input, err)
 			}
 
-			rec, ok := s.Stats(code)
-			if !ok {
-				t.Fatalf("Stats(%q) returned ok=false; want ok=true", code)
+			rec, err := s.Stats(code)
+			if err != nil {
+				t.Fatalf("Stats(%q) returned unexpected error: %v", code, err)
 			}
 			if rec.Code != code {
 				t.Errorf("Stats(%q).Code = %q; want %q", code, rec.Code, code)
@@ -232,6 +240,9 @@ func TestIncrementClicksAndStats(t *testing.T) {
 			if rec.CreatedAt.Before(before) {
 				t.Errorf("Stats(%q).CreatedAt = %v; want a time at or after %v", code, rec.CreatedAt, before)
 			}
+			if rec.ExpiresAt != nil {
+				t.Errorf("Stats(%q).ExpiresAt = %v; want nil for a link stored without a ttl", code, rec.ExpiresAt)
+			}
 
 			const n = 3
 			for i := 0; i < n; i++ {
@@ -240,9 +251,9 @@ func TestIncrementClicksAndStats(t *testing.T) {
 				}
 			}
 
-			rec, ok = s.Stats(code)
-			if !ok {
-				t.Fatalf("Stats(%q) returned ok=false after increments; want ok=true", code)
+			rec, err = s.Stats(code)
+			if err != nil {
+				t.Fatalf("Stats(%q) returned unexpected error after increments: %v", code, err)
 			}
 			if rec.Clicks != n {
 				t.Errorf("Stats(%q).Clicks = %d; want %d", code, rec.Clicks, n)
@@ -251,7 +262,7 @@ func TestIncrementClicksAndStats(t *testing.T) {
 	}
 }
 
-// TestStatsUnknown verifies that Stats reports ok=false and IncrementClicks
+// TestStatsUnknown verifies that Stats and IncrementClicks both report ErrNotFound
 // reports an error for a code that was never stored.
 func TestStatsUnknown(t *testing.T) {
 	for _, tc := range storeCases {
@@ -260,8 +271,8 @@ func TestStatsUnknown(t *testing.T) {
 			s := tc.newStore(t)
 
 			const unknown = "nope"
-			if _, ok := s.Stats(unknown); ok {
-				t.Errorf("Stats(%q) returned ok=true; want ok=false", unknown)
+			if _, err := s.Stats(unknown); !errors.Is(err, store.ErrNotFound) {
+				t.Errorf("Stats(%q) error = %v; want it to wrap store.ErrNotFound", unknown, err)
 			}
 			err := s.IncrementClicks(unknown)
 			if err == nil {
@@ -285,21 +296,21 @@ func TestPutAlias(t *testing.T) {
 			const alias = "my-link"
 			const url = "https://example.com/custom"
 
-			if err := s.PutAlias(url, alias); err != nil {
+			if err := s.PutAlias(url, alias, 0); err != nil {
 				t.Fatalf("PutAlias(%q, %q) unexpected error: %v", url, alias, err)
 			}
 
-			got, ok := s.Get(alias)
-			if !ok {
-				t.Fatalf("Get(%q) returned ok=false; want ok=true", alias)
+			got, err := s.Get(alias)
+			if err != nil {
+				t.Fatalf("Get(%q) returned unexpected error: %v", alias, err)
 			}
 			if got != url {
 				t.Errorf("Get(%q) = %q; want %q", alias, got, url)
 			}
 
-			rec, ok := s.Stats(alias)
-			if !ok {
-				t.Fatalf("Stats(%q) returned ok=false; want ok=true", alias)
+			rec, err := s.Stats(alias)
+			if err != nil {
+				t.Fatalf("Stats(%q) returned unexpected error: %v", alias, err)
 			}
 			if rec.Code != alias {
 				t.Errorf("Stats(%q).Code = %q; want %q", alias, rec.Code, alias)
@@ -322,11 +333,11 @@ func TestPutAliasDuplicate(t *testing.T) {
 			const alias = "taken"
 			const first = "https://example.com/first"
 
-			if err := s.PutAlias(first, alias); err != nil {
+			if err := s.PutAlias(first, alias, 0); err != nil {
 				t.Fatalf("PutAlias(%q, %q) unexpected error: %v", first, alias, err)
 			}
 
-			err := s.PutAlias("https://example.com/second", alias)
+			err := s.PutAlias("https://example.com/second", alias, 0)
 			if err == nil {
 				t.Fatalf("PutAlias with duplicate alias %q returned nil error; want an error", alias)
 			}
@@ -353,11 +364,11 @@ func TestPutSkipsAliasedCodes(t *testing.T) {
 			// alias so Put must skip past it.
 			first := shortcode.Encode(1)
 			const aliasURL = "https://example.com/reserved"
-			if err := s.PutAlias(aliasURL, first); err != nil {
+			if err := s.PutAlias(aliasURL, first, 0); err != nil {
 				t.Fatalf("PutAlias(%q, %q) unexpected error: %v", aliasURL, first, err)
 			}
 
-			code, err := s.Put("https://example.com/generated")
+			code, err := s.Put("https://example.com/generated", 0)
 			if err != nil {
 				t.Fatalf("Put() unexpected error: %v", err)
 			}
@@ -367,6 +378,144 @@ func TestPutSkipsAliasedCodes(t *testing.T) {
 
 			if got, _ := s.Get(first); got != aliasURL {
 				t.Errorf("Get(%q) = %q; want the alias target %q", first, got, aliasURL)
+			}
+		})
+	}
+}
+
+// fakeClock is a manually advanced clock used to exercise expiry without
+// sleeping. It is safe for concurrent use.
+type fakeClock struct {
+	mu sync.Mutex
+	t  time.Time
+}
+
+func newFakeClock(t time.Time) *fakeClock { return &fakeClock{t: t} }
+
+func (c *fakeClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.t
+}
+
+func (c *fakeClock) Advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.t = c.t.Add(d)
+}
+
+// TestPutWithTTL verifies that a link stored with a ttl resolves before its
+// expiry and reports ErrExpired at and after it.
+func TestPutWithTTL(t *testing.T) {
+	for _, tc := range storeCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			clock := newFakeClock(time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC))
+			s := tc.newStoreClock(t, clock.Now)
+
+			const input = "https://example.com/expiring"
+			const ttl = time.Hour
+
+			code, err := s.Put(input, ttl)
+			if err != nil {
+				t.Fatalf("Put(%q, %v) unexpected error: %v", input, ttl, err)
+			}
+
+			rec, err := s.Stats(code)
+			if err != nil {
+				t.Fatalf("Stats(%q) before expiry: %v", code, err)
+			}
+			if rec.ExpiresAt == nil {
+				t.Fatalf("Stats(%q).ExpiresAt is nil; want a timestamp", code)
+			}
+			if want := clock.Now().Add(ttl); !rec.ExpiresAt.Equal(want) {
+				t.Errorf("Stats(%q).ExpiresAt = %v; want %v", code, rec.ExpiresAt, want)
+			}
+
+			// Just shy of expiry the link still resolves.
+			clock.Advance(ttl - time.Nanosecond)
+			got, err := s.Get(code)
+			if err != nil {
+				t.Fatalf("Get(%q) just before expiry: %v", code, err)
+			}
+			if got != input {
+				t.Errorf("Get(%q) = %q; want %q", code, got, input)
+			}
+
+			// At the expiry instant it is gone, and stays gone after it.
+			clock.Advance(time.Nanosecond)
+			if _, err := s.Get(code); !errors.Is(err, store.ErrExpired) {
+				t.Errorf("Get(%q) at expiry error = %v; want it to wrap store.ErrExpired", code, err)
+			}
+			if _, err := s.Stats(code); !errors.Is(err, store.ErrExpired) {
+				t.Errorf("Stats(%q) at expiry error = %v; want it to wrap store.ErrExpired", code, err)
+			}
+
+			clock.Advance(24 * time.Hour)
+			if _, err := s.Get(code); !errors.Is(err, store.ErrExpired) {
+				t.Errorf("Get(%q) after expiry error = %v; want it to wrap store.ErrExpired", code, err)
+			}
+		})
+	}
+}
+
+// TestPutWithoutTTLNeverExpires verifies that links stored with a zero ttl
+// keep resolving no matter how far the clock moves.
+func TestPutWithoutTTLNeverExpires(t *testing.T) {
+	for _, tc := range storeCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			clock := newFakeClock(time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC))
+			s := tc.newStoreClock(t, clock.Now)
+
+			const input = "https://example.com/forever"
+			code, err := s.Put(input, 0)
+			if err != nil {
+				t.Fatalf("Put(%q, 0) unexpected error: %v", input, err)
+			}
+
+			clock.Advance(100 * 365 * 24 * time.Hour)
+
+			got, err := s.Get(code)
+			if err != nil {
+				t.Fatalf("Get(%q) a century later: %v", code, err)
+			}
+			if got != input {
+				t.Errorf("Get(%q) = %q; want %q", code, got, input)
+			}
+			rec, err := s.Stats(code)
+			if err != nil {
+				t.Fatalf("Stats(%q) a century later: %v", code, err)
+			}
+			if rec.ExpiresAt != nil {
+				t.Errorf("Stats(%q).ExpiresAt = %v; want nil", code, rec.ExpiresAt)
+			}
+		})
+	}
+}
+
+// TestPutAliasWithTTL verifies that custom aliases honour expiry too.
+func TestPutAliasWithTTL(t *testing.T) {
+	for _, tc := range storeCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			clock := newFakeClock(time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC))
+			s := tc.newStoreClock(t, clock.Now)
+
+			const alias = "temp-link"
+			const url = "https://example.com/temp"
+
+			if err := s.PutAlias(url, alias, time.Minute); err != nil {
+				t.Fatalf("PutAlias(%q, %q, 1m) unexpected error: %v", url, alias, err)
+			}
+
+			if got, err := s.Get(alias); err != nil || got != url {
+				t.Fatalf("Get(%q) = (%q, %v); want (%q, nil)", alias, got, err, url)
+			}
+
+			clock.Advance(time.Minute)
+			if _, err := s.Get(alias); !errors.Is(err, store.ErrExpired) {
+				t.Errorf("Get(%q) after expiry error = %v; want it to wrap store.ErrExpired", alias, err)
 			}
 		})
 	}

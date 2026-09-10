@@ -16,8 +16,18 @@ POST /shorten  {"url":"https://example.com/very/long/path"}
 POST /shorten  {"url":"https://example.com/docs","alias":"docs"}
   -> {"code":"docs","short_url":"http://localhost:8080/docs"}
 
+POST /shorten  {"url":"https://example.com/promo","expires_in":"24h"}
+  -> {"code":"cD4y","short_url":"http://localhost:8080/cD4y"}
+
 GET  /aB3x        -> 302 redirect to the original URL
 GET  /aB3x/stats  -> {"code":"aB3x","url":"...","clicks":42,"created_at":"..."}
+```
+
+`expires_in` is optional: give it a number of seconds (`3600`) or a duration
+string (`"1h30m"`). Links created without it never expire. Once a link's expiry
+passes, both the redirect and its stats return `410 Gone`.
+
+```
 ```
 
 ## Status
