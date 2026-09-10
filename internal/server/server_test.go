@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -44,7 +45,7 @@ func TestRedirectKnownCode(t *testing.T) {
 	s := store.NewMemStore()
 	const originalURL = "https://example.com/some/path"
 
-	code, err := s.Put(originalURL)
+	code, err := s.Put(originalURL, 0)
 	if err != nil {
 		t.Fatalf("Put(%q) unexpected error: %v", originalURL, err)
 	}
@@ -286,7 +287,7 @@ func TestStatsAfterRedirects(t *testing.T) {
 	s := store.NewMemStore()
 	const originalURL = "https://example.com/some/path"
 
-	code, err := s.Put(originalURL)
+	code, err := s.Put(originalURL, 0)
 	if err != nil {
 		t.Fatalf("Put(%q) unexpected error: %v", originalURL, err)
 	}
@@ -461,4 +462,166 @@ func TestPostShortenInvalidAlias(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestExpiredLinkIsGone covers the acceptance criterion for link expiry: with
+// an injected clock, a code created with expires_in resolves before its expiry
+// and returns 410 Gone — on both redirect and stats — once it has passed.
+func TestExpiredLinkIsGone(t *testing.T) {
+	clock := newFakeClock(time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC))
+	s := store.NewMemStore(store.WithClock(clock.Now))
+	handler := server.New(s, "http://localhost:8080")
+
+	res := postShorten(t, handler, `{"url":"https://example.com/temp","expires_in":"1h"}`)
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusCreated {
+		t.Fatalf("expected status 201, got %d", res.StatusCode)
+	}
+
+	var created struct {
+		Code string `json:"code"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&created); err != nil {
+		t.Fatalf("decoding response: %v", err)
+	}
+
+	// Before expiry: redirect and stats both work.
+	if got := get(t, handler, "/"+created.Code); got.Code != http.StatusFound {
+		t.Fatalf("GET /%s before expiry: expected status 302, got %d", created.Code, got.Code)
+	}
+	statsRec := get(t, handler, "/"+created.Code+"/stats")
+	if statsRec.Code != http.StatusOK {
+		t.Fatalf("GET /%s/stats before expiry: expected status 200, got %d", created.Code, statsRec.Code)
+	}
+	var rec store.Record
+	if err := json.NewDecoder(statsRec.Body).Decode(&rec); err != nil {
+		t.Fatalf("decoding stats: %v", err)
+	}
+	if rec.ExpiresAt == nil {
+		t.Error("stats expires_at is missing; want the link's expiry")
+	} else if want := clock.Now().Add(time.Hour); !rec.ExpiresAt.Equal(want) {
+		t.Errorf("stats expires_at = %v; want %v", rec.ExpiresAt, want)
+	}
+
+	// After expiry: both are 410 Gone.
+	clock.Advance(time.Hour)
+	if got := get(t, handler, "/"+created.Code); got.Code != http.StatusGone {
+		t.Errorf("GET /%s after expiry: expected status 410, got %d", created.Code, got.Code)
+	}
+	if got := get(t, handler, "/"+created.Code+"/stats"); got.Code != http.StatusGone {
+		t.Errorf("GET /%s/stats after expiry: expected status 410, got %d", created.Code, got.Code)
+	}
+}
+
+// TestLinkWithoutExpiresInNeverExpires verifies that a link created without
+// expires_in keeps resolving however far the clock advances.
+func TestLinkWithoutExpiresInNeverExpires(t *testing.T) {
+	clock := newFakeClock(time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC))
+	s := store.NewMemStore(store.WithClock(clock.Now))
+	handler := server.New(s, "http://localhost:8080")
+
+	res := postShorten(t, handler, `{"url":"https://example.com/forever"}`)
+	defer res.Body.Close()
+
+	var created struct {
+		Code string `json:"code"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&created); err != nil {
+		t.Fatalf("decoding response: %v", err)
+	}
+
+	clock.Advance(100 * 365 * 24 * time.Hour)
+
+	rec := get(t, handler, "/"+created.Code)
+	if rec.Code != http.StatusFound {
+		t.Fatalf("GET /%s a century later: expected status 302, got %d", created.Code, rec.Code)
+	}
+	if loc := rec.Header().Get("Location"); loc != "https://example.com/forever" {
+		t.Errorf("Location = %q; want %q", loc, "https://example.com/forever")
+	}
+	if got := get(t, handler, "/"+created.Code+"/stats"); got.Code != http.StatusOK {
+		t.Errorf("GET /%s/stats a century later: expected status 200, got %d", created.Code, got.Code)
+	}
+}
+
+// TestExpiringAlias verifies that expires_in applies to custom aliases too.
+func TestExpiringAlias(t *testing.T) {
+	clock := newFakeClock(time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC))
+	s := store.NewMemStore(store.WithClock(clock.Now))
+	handler := server.New(s, "http://localhost:8080")
+
+	res := postShorten(t, handler, `{"url":"https://example.com/temp","alias":"temp","expires_in":600}`)
+	res.Body.Close()
+	if res.StatusCode != http.StatusCreated {
+		t.Fatalf("expected status 201, got %d", res.StatusCode)
+	}
+
+	if got := get(t, handler, "/temp"); got.Code != http.StatusFound {
+		t.Fatalf("GET /temp before expiry: expected status 302, got %d", got.Code)
+	}
+
+	clock.Advance(10 * time.Minute)
+	if got := get(t, handler, "/temp"); got.Code != http.StatusGone {
+		t.Errorf("GET /temp after expiry: expected status 410, got %d", got.Code)
+	}
+}
+
+// TestPostShortenInvalidExpiresIn verifies that an unusable expires_in value
+// is rejected with 400 before anything is stored.
+func TestPostShortenInvalidExpiresIn(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "zero", body: `{"url":"https://example.com","expires_in":0}`},
+		{name: "negative", body: `{"url":"https://example.com","expires_in":-60}`},
+		{name: "unparseable duration", body: `{"url":"https://example.com","expires_in":"soon"}`},
+		{name: "wrong type", body: `{"url":"https://example.com","expires_in":true}`},
+		{name: "beyond maximum", body: `{"url":"https://example.com","expires_in":"87601h"}`},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			handler := server.New(store.NewMemStore(), "http://localhost:8080")
+
+			res := postShorten(t, handler, tc.body)
+			defer res.Body.Close()
+
+			if res.StatusCode != http.StatusBadRequest {
+				t.Errorf("expected status 400, got %d", res.StatusCode)
+			}
+		})
+	}
+}
+
+// get issues a GET request against handler and returns the recorder.
+func get(t *testing.T, handler http.Handler, path string) *httptest.ResponseRecorder {
+	t.Helper()
+
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	return rec
+}
+
+// fakeClock is a manually advanced clock used to exercise expiry without
+// sleeping. It is safe for concurrent use.
+type fakeClock struct {
+	mu sync.Mutex
+	t  time.Time
+}
+
+func newFakeClock(t time.Time) *fakeClock { return &fakeClock{t: t} }
+
+func (c *fakeClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.t
+}
+
+func (c *fakeClock) Advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.t = c.t.Add(d)
 }
